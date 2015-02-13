@@ -1,18 +1,18 @@
-#include <ADNS2610.h>
+#define DEBUG
 
-#define OPTIMOUSE_SCLK 2                            // Serial clock pin on the Arduino
-#define OPTIMOUSE_SDIO 3                            // Serial data (I/O) pin on the Arduino
 #define MOTOR_RIGHT_FWD 5
 #define MOTOR_RIGHT_BCK 6
 #define MOTOR_LEFT_FWD 9
-#define MOTOR_LEFT_BCK 10
+#define MOTOR_LEFT_BCK 3 // 10
 #define STATE_IDLE 0
 #define STATE_DRIVING 1
 #define STATE_TURNING 2
 #define STATE_TURNING_WIDE 3
 
-const float sensorRadius = 58; // in mm
-const float mouseCPI = 444;  // counts per inch of mousesensor
+#include <SPI.h>
+#include "ADNS9800.h"
+const float sensorRadius = 58.0; // in mm
+const float mouseCPI = 820.0;  // counts per inch of mousesensor
 
 int state;
 int programStep;
@@ -26,20 +26,20 @@ int bresenhamCounter;
 
 int iValue;
 
-ADNS2610 optiMouse = ADNS2610(OPTIMOUSE_SCLK, OPTIMOUSE_SDIO);
-
-void  resetFilter()
-{
+void  resetFilter(){
   iValue = 0;
 }
 
 
+////////////////////////////////
+//setup
+/////////////////////////////////
 void setup(){
-
+  
 	Serial.begin(38400);
-
-	optiMouse.begin();
-	optiMouse.setSleepEnabled(false);
+  
+  //attachInterrupt(0, UpdatePointer, FALLING);
+  initADNS9800();
 
 	state = STATE_IDLE;
         programStep = 0;
@@ -49,10 +49,9 @@ int updatePDControl(int inVal)
 {
     int correction = 0;				
     // super-simpel-regler
-    //correction = map(deltaX, -10, 10, -100, 100);
-    correction = constrain(inVal * 10, -100, 100);
+    correction = constrain(inVal * 3, -100, 100);
     iValue += inVal;
-    correction += (iValue >> 4);  // (division by 16)
+    correction += (iValue >> 5);  // (division by 32)
     
     return correction;
 }
@@ -79,9 +78,67 @@ void setMotors(int right, int left){
 
 }
 
-void loop(){
-	updateMouse();
+void drive(int distance){
+  float counts = distance * mouseCPI / 25.4f;
+	state = STATE_DRIVING;
+	targetY = currentY + counts;
+	targetX = currentX;
+  resetFilter();
+}
 
+
+void turn(int angle){
+  state = STATE_TURNING;
+	float counts = angle * sensorRadius * PI * mouseCPI / (180.0f * 25.4f);
+  targetX = currentX + (int)counts;
+  targetY = currentY;
+  resetFilter();
+}
+
+
+void turnWide(int distance, int ratio){
+  state = STATE_TURNING_WIDE;
+	float counts = distance * mouseCPI / 25.4f;
+	targetY = currentY + counts;
+	targetX = currentX;
+  bresenhamCounter = 0;
+  bresenhamRatio = ratio;
+  resetFilter();
+}
+
+///////////////////////////////////////
+// loop
+//////////////////////////////////////
+
+void loop(){	
+	
+	if (1){
+    UpdatePointer();
+    currentX += *x;
+    currentY += *y;
+      
+		#ifdef DEBUG
+  		Serial.print("posx:");
+  		Serial.print("\t\t");
+  		Serial.print(currentX);
+  		Serial.print("\t\t");
+  		Serial.print("posy:");
+  		Serial.print("\t\t");
+  		Serial.print(currentY);
+  		Serial.print("\t\t");
+  		
+  		Serial.print("dx:");
+  		Serial.print("\t\t");
+  		Serial.print(*x); //float (*x)/8200*25.4);
+  		Serial.print("\t\t");
+  		Serial.print("dy: ");
+  		Serial.print("\t\t");
+  		Serial.print(*y); //float (*y)/8200*25.4);
+  		Serial.print("\t\t");
+  		Serial.println();
+  	#endif
+  }
+    
 	switch(state){
 		case STATE_IDLE:
 			break;
@@ -92,17 +149,9 @@ void loop(){
 				setMotors(0,0);
 				state = STATE_IDLE;
 			} else {
-                                int deltaX = currentX - targetX;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
-                                int correction = updatePDControl(deltaX);
+        int deltaX = currentX - targetX;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
+        int correction = updatePDControl(deltaX);
 				setMotors(200 - correction, 200 + correction);
-                                
-                                /*
-                                Serial.print(deltaX);
-                                Serial.print("\t\t");
-                                Serial.print(targetY - currentY);
-                                Serial.print("\t\t");
-                                Serial.println(correction);
-                                */
 			}
 
 			break;
@@ -113,110 +162,49 @@ void loop(){
 				setMotors(0,0);
 				state = STATE_IDLE;
 			} else {
-                                int deltaY = currentY - targetY;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
-                                int correction = updatePDControl(deltaY);
-				setMotors(200 - correction, -200 - correction);
-
-                                /*
-                                Serial.print(targetX - currentX);
-                                Serial.print("\t\t");
-                                Serial.print(deltaY);
-                                Serial.print("\t\t");
-                                Serial.println(correction);
-                                */                                
+        int deltaY = currentY - targetY;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
+        int correction = updatePDControl(deltaY);
+				setMotors(200 - correction, -200 - correction); 
 			}
 			break;
 		
-                  case STATE_TURNING_WIDE:
-			if(currentY >= targetY) {
-				// stop motors
-				setMotors(0,0);
-				state = STATE_IDLE;
-			} else {
-                                bresenhamCounter += currentDeltaY;
-                                while (bresenhamCounter > bresenhamRatio)
-                                {
-                                  targetX++;
-                                  bresenhamCounter -= bresenhamRatio;
-                                }
-                                int deltaX = currentX - targetX;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
-                                int correction = updatePDControl(deltaX);
-				setMotors(200 - correction, 200 + correction);
-                                
-                                /*
-                                Serial.print(deltaX);
-                                Serial.print("\t\t");
-                                Serial.print(targetY - currentY);
-                                Serial.print("\t\t");
-                                Serial.println(correction);
-                                */
-			}
+      case STATE_TURNING_WIDE:
+  			if(currentY >= targetY) {
+  				// stop motors
+  				setMotors(0,0);
+  				state = STATE_IDLE;
+  			} else {
+          bresenhamCounter += currentDeltaY;
+          while (bresenhamCounter > bresenhamRatio)
+          {
+            targetX++;
+            bresenhamCounter -= bresenhamRatio;
+          }
+          int deltaX = currentX - targetX;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
+          int correction = updatePDControl(deltaX);
+  				setMotors(200 - correction, 200 + correction);
+  			}
 			break;
 
 	}
 
 	if(state == STATE_IDLE){
 		delay(2000);
-                switch (programStep)
-                {
-                    case 0:
-		      drive(600);
-                      break;
-                    case 1:
-                      turn(90);
-                      break;
-                    case 2:
-		      drive(400);
-                      break;
-                    case 3:
-                      turn(90);
-                      break;
-                }
-                programStep = (programStep + 1) % 4;  // endless loop ...    
+      switch (programStep) {
+        case 0:
+          drive(600);
+          break;
+        case 1:
+          turn(90);
+          break;
+        case 2:
+          drive(400);
+          break;
+        case 3:
+          turn(90);
+          break;
+      }
+      
+      programStep = (programStep + 1) % 4;  // endless loop ...    
 	}
-}
-
-void drive(int distance){
-        float counts = distance * mouseCPI / 25.4f;
-	state = STATE_DRIVING;
-	targetY = currentY + counts;
-	targetX = currentX;
-        resetFilter();
-}
-
-
-void turn(int angle){
-        state = STATE_TURNING;
-	float counts = angle * sensorRadius * PI * mouseCPI / (180.0f * 25.4f);
-        targetX = currentX + (int)counts;
-        targetY = currentY;
-        resetFilter();
-}
-
-
-void turnWide(int distance, int ratio){
-        state = STATE_TURNING_WIDE;
-	float counts = distance * mouseCPI / 25.4f;
-	targetY = currentY + counts;
-	targetX = currentX;
-        bresenhamCounter = 0;
-        bresenhamRatio = ratio;
-        resetFilter();
-}
-
-
-void updateMouse(){
-  
-  if (!optiMouse.verifyPID()) {
-	Serial.println("fl");    
-	Serial.flush();
-	optiMouse.begin();
-	return;  
-  }
-  
-  currentDeltaX = optiMouse.dy();
-  currentDeltaY = -optiMouse.dx();
-  
-  currentX += currentDeltaX;
-  currentY += currentDeltaY;
 }
