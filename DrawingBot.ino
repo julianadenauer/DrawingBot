@@ -1,28 +1,45 @@
+/*
+ *
+ * DrawingBot.ino
+ *
+ */
+
+
 #define DEBUG
 
-#define MOTOR_RIGHT_FWD 5
-#define MOTOR_RIGHT_BCK 6
-#define MOTOR_LEFT_FWD 9
-#define MOTOR_LEFT_BCK 3 // 10
+#define MOTOR_RIGHT_FWD	5
+#define MOTOR_RIGHT_BCK	6
+#define MOTOR_LEFT_FWD	9
+#define MOTOR_LEFT_BCK	10
 #define STATE_IDLE 0
 #define STATE_DRIVING 1
 #define STATE_TURNING 2
 #define STATE_TURNING_WIDE 3
+#define STATE_TURNING_RIGHT 4
 
-#include <SPI.h>
-#include "ADNS9800.h"
-const float sensorRadius = 58.0; // in mm
-const float mouseCPI = 820.0;  // counts per inch of mousesensor
+#define ENC_0_A		2	//Interrupt0
+#define ENC_0_B		4
+#define ENC_1_A		3	//Interrupt1
+#define ENC_1_B		7
+long lastX = 0;
+long lastY = 0;
 
 int state;
 int programStep;
-long currentX, currentY;
-long currentDeltaX, currentDeltaY;
-long targetX, targetY;
+
+volatile long currentRight, currentLeft;
+volatile long lastRight, lastLeft;
+long deltaRight, deltaLeft;
+long targetRight, targetLeft;
+
+const int rampLength = 1000;
+const int startPower = 100; // minimalwert bei der die Anfahrrampe beginnt
+
+long startTime;
 
 // var's for bresenham algorithmus used in turning-wide state
 int bresenhamRatio;
-int bresenhamCounter;
+long bresenhamCounter;
 
 int iValue;
 
@@ -39,18 +56,57 @@ void setup(){
 	Serial.begin(38400);
   
   //attachInterrupt(0, UpdatePointer, FALLING);
-  initADNS9800();
+	#ifdef ADNS9800
+		initADNS9800();
+	#endif
 
+	 // encoder 0 
+	pinMode(ENC_0_A,		INPUT); 
+	//digitalWrite(ENC_0_A,	HIGH);       // turn on pullup resistor
+	pinMode(ENC_0_B,		INPUT); 
+	//digitalWrite(ENC_0_B,	HIGH);       // turn on pullup resistor
+	attachInterrupt(0, doEncoder0, CHANGE);  // encoder pin on interrupt 0 - pin 2
+	// encoder 1
+	pinMode(ENC_1_A,		INPUT);
+	//digitalWrite(ENC_1_A,	HIGH);
+	pinMode(ENC_1_B,		INPUT);
+	//digitalWrite(ENC_1_B,	HIGH);
+	attachInterrupt(1, doEncoder1, CHANGE);	// encoder pin on interrupt 1 - pin 3
+ 
 	state = STATE_IDLE;
         programStep = 0;
 }
 
-int updatePDControl(int inVal)
+void doEncoder0() {
+  /* If pinA and pinB are both high or both low, it is spinning
+   * forward. If they're different, it's going backward.
+   *
+   * For more information on speeding up this process, see
+   * [Reference/PortManipulation], specifically the PIND register.
+   */
+  if(digitalRead(ENC_0_A) == digitalRead(ENC_0_B)) {
+    currentRight--;
+  } else {
+    currentRight++;
+  }
+  //~ Serial.println(encoder0Pos,DEC);
+}
+
+void doEncoder1() {
+  if(digitalRead(ENC_1_A) == digitalRead(ENC_1_B)) {
+    currentLeft++;
+  } else {
+    currentLeft--;
+  }
+}
+
+
+int updatePDControl(int delta)
 {
-    int correction = 0;				
+    int correction = 0;
     // super-simpel-regler
-    correction = constrain(inVal * 3, -100, 100);
-    iValue += inVal;
+    correction = constrain(delta * 3, -100, 100);
+    iValue += delta;
     correction += (iValue >> 5);  // (division by 32)
     
     return correction;
@@ -79,31 +135,30 @@ void setMotors(int right, int left){
 }
 
 void drive(int distance){
-  float counts = distance * mouseCPI / 25.4f;
 	state = STATE_DRIVING;
-	targetY = currentY + counts;
-	targetX = currentX;
+	targetRight = currentRight + distance;
+	targetLeft = currentLeft + distance;
   resetFilter();
 }
 
-
-void turn(int angle){
-  state = STATE_TURNING;
-	float counts = angle * sensorRadius * PI * mouseCPI / (180.0f * 25.4f);
-  targetX = currentX + (int)counts;
-  targetY = currentY;
-  resetFilter();
-}
-
-
-void turnWide(int distance, int ratio){
-  state = STATE_TURNING_WIDE;
-	float counts = distance * mouseCPI / 25.4f;
-	targetY = currentY + counts;
-	targetX = currentX;
-  bresenhamCounter = 0;
+void turnRight(int ratio, int distance){
+  resetCounters();
+  targetRight = 0;
   bresenhamRatio = ratio;
+  bresenhamCounter = 0;
+  startTime = millis();
   resetFilter();
+
+  targetLeft = distance;
+
+  state = STATE_TURNING_RIGHT;
+}
+
+void resetCounters(){
+  currentLeft = 0;
+  currentRight = 0;
+  lastLeft = 0;
+  lastRight = 0;
 }
 
 ///////////////////////////////////////
@@ -112,99 +167,90 @@ void turnWide(int distance, int ratio){
 
 void loop(){	
 	
-	if (1){
-    UpdatePointer();
-    currentX += *x;
-    currentY += *y;
+	deltaLeft = currentLeft - lastLeft;
+  deltaRight = currentRight - lastRight;
+  lastLeft = currentLeft;
+  lastRight = currentRight;
       
-		#ifdef DEBUG
-  		Serial.print("posx:");
-  		Serial.print("\t\t");
-  		Serial.print(currentX);
-  		Serial.print("\t\t");
-  		Serial.print("posy:");
-  		Serial.print("\t\t");
-  		Serial.print(currentY);
-  		Serial.print("\t\t");
-  		
-  		Serial.print("dx:");
-  		Serial.print("\t\t");
-  		Serial.print(*x); //float (*x)/8200*25.4);
-  		Serial.print("\t\t");
-  		Serial.print("dy: ");
-  		Serial.print("\t\t");
-  		Serial.print(*y); //float (*y)/8200*25.4);
-  		Serial.print("\t\t");
-  		Serial.println();
-  	#endif
-  }
+	#ifdef DEBUG
+		Serial.print("currentX:");
+		Serial.print("\t\t");
+		Serial.print(currentRight);
+		Serial.print("\t\t");
+		Serial.print("currentY:");
+		Serial.print("\t\t");
+		Serial.print(currentLeft);
+		Serial.print("\t\t");
+	#endif
     
 	switch(state){
 		case STATE_IDLE:
 			break;
 		
 		case STATE_DRIVING:
-			if(currentY >= targetY){
+			if(currentRight >= targetRight && currentLeft  >= targetLeft){
 				// stop motors
 				setMotors(0,0);
 				state = STATE_IDLE;
 			} else {
-        int deltaX = currentX - targetX;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
-        int correction = updatePDControl(deltaX);
-				setMotors(200 - correction, 200 + correction);
+        // ENCODER VERSION
+        long delta = currentRight - currentLeft; // calculate pos difference
+        Serial.println(delta);
+        int correction = updatePDControl(delta);
+        setMotors(200 - correction, 200 + correction);
 			}
 
 			break;
-		
-		case STATE_TURNING:
-			if(currentX >= targetX){
-				// stop motors
-				setMotors(0,0);
-				state = STATE_IDLE;
-			} else {
-        int deltaY = currentY - targetY;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
-        int correction = updatePDControl(deltaY);
-				setMotors(200 - correction, -200 - correction); 
-			}
-			break;
-		
-      case STATE_TURNING_WIDE:
-  			if(currentY >= targetY) {
-  				// stop motors
-  				setMotors(0,0);
-  				state = STATE_IDLE;
-  			} else {
-          bresenhamCounter += currentDeltaY;
-          while (bresenhamCounter > bresenhamRatio)
-          {
-            targetX++;
-            bresenhamCounter -= bresenhamRatio;
-          }
-          int deltaX = currentX - targetX;  // (eigentlich immer target - current, bei gelegenheit mal ändern)
-          int correction = updatePDControl(deltaX);
-  				setMotors(200 - correction, 200 + correction);
-  			}
-			break;
 
+    case STATE_TURNING_RIGHT:
+      if(currentLeft >= targetLeft){
+        setMotors(0,0);
+        state = STATE_IDLE;          
+      }
+      else {
+        bresenhamCounter += deltaLeft * 1000;       // hier *1000 damit wir das ratio genauer einstellen können
+        while(bresenhamCounter > bresenhamRatio){
+          targetRight++;
+          bresenhamCounter -= bresenhamRatio;  
+        }
+        int delta = targetRight - currentRight;
+        int correction = updatePDControl(delta);
+
+        int drivePower = 200;
+        
+        // anfahrrampe
+        int dT = millis() - startTime;
+        if(dT < rampLength){
+            long temp = drivePower - startPower;
+            temp *= dT;
+            drivePower = startPower + (int) (temp / rampLength);
+            Serial.println(drivePower);
+        }
+
+        setMotors(drivePower + correction, drivePower - correction);
+      }
+      break;
 	}
 
 	if(state == STATE_IDLE){
 		delay(2000);
       switch (programStep) {
         case 0:
-          drive(600);
+          turnRight(2000, 20000);
+          // turn(90);
           break;
         case 1:
-          turn(90);
+          delay(500);
+          // turn(90);
           break;
         case 2:
           drive(400);
           break;
         case 3:
-          turn(90);
+          // turn(90);
           break;
       }
       
-      programStep = (programStep + 1) % 4;  // endless loop ...    
+      programStep = (programStep + 1) % 2;  // endless loop ...    
 	}
 }
