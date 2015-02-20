@@ -21,6 +21,16 @@
 #define ENC_0_B		4
 #define ENC_1_A		3	//Interrupt1
 #define ENC_1_B		7
+
+
+const int encoderCountsPerTurn = 300;
+const float wheelDiameter = 26.02;
+const float wheelBase = 89;
+
+const float mmToCounts = ((float)encoderCountsPerTurn) / (wheelDiameter * M_PI);
+
+
+
 long lastX = 0;
 long lastY = 0;
 
@@ -36,6 +46,10 @@ const int rampLength = 1000;
 const int startPower = 100; // minimalwert bei der die Anfahrrampe beginnt
 
 long startTime;
+
+int leftMotorDir;
+int rightMotorDir;
+
 
 // var's for bresenham algorithmus used in turning-wide state
 int bresenhamRatio;
@@ -134,13 +148,29 @@ void setMotors(int right, int left){
 
 }
 
-void drive(int distance){
+
+void drive(float distance){
+        
+  
 	state = STATE_DRIVING;
-	targetRight = currentRight + distance;
-	targetLeft = currentLeft + distance;
-  resetFilter();
+        if (distance >= 0)
+        {
+          leftMotorDir = 1;
+          rightMotorDir = 1;
+        }
+        else
+        {
+          leftMotorDir = -1;
+          rightMotorDir = -1;
+        }
+
+	targetRight = (long)(mmToCounts * distance);
+	targetLeft = (long)(mmToCounts * distance);
+        resetFilter();
+        resetCounters();
 }
 
+/*
 void turnRight(int ratio, int distance){
   resetCounters();
   targetRight = 0;
@@ -148,11 +178,49 @@ void turnRight(int ratio, int distance){
   bresenhamCounter = 0;
   startTime = millis();
   resetFilter();
-
+  
   targetLeft = distance;
 
   state = STATE_TURNING_RIGHT;
 }
+*/
+
+void turnRight(float radius, float distance){
+  resetCounters();
+
+  targetRight = 0;
+  bresenhamCounter = 0;
+
+  if (distance >= 0)
+  {
+    leftMotorDir = 1;
+    rightMotorDir = 1;
+  }
+  else
+  {
+    leftMotorDir = -1;
+    rightMotorDir = -1;
+  }
+  
+  float distanceLeft = distance * (radius + 0.5 * wheelBase) / radius;
+  
+  float speedRatio = (radius + 0.5 * wheelBase) / (radius - 0.5 * wheelBase);
+  if (speedRatio < 0)
+  {
+    speedRatio =- speedRatio;
+    leftMotorDir = -leftMotorDir;
+  }
+  
+  targetLeft = (long)(distanceLeft * mmToCounts) * leftMotorDir;
+ 
+  bresenhamRatio = (int)(speedRatio * 1000);
+  
+  startTime = millis();
+  resetFilter();
+ 
+  state = STATE_TURNING_RIGHT;
+}
+
 
 void resetCounters(){
   currentLeft = 0;
@@ -167,10 +235,10 @@ void resetCounters(){
 
 void loop(){	
 	
-	deltaLeft = currentLeft - lastLeft;
-  deltaRight = currentRight - lastRight;
-  lastLeft = currentLeft;
-  lastRight = currentRight;
+      deltaLeft = currentLeft - lastLeft;
+      deltaRight = currentRight - lastRight;
+      lastLeft = currentLeft;
+      lastRight = currentRight;
       
 	#ifdef DEBUG
 		Serial.print("currentX:");
@@ -197,22 +265,23 @@ void loop(){
         long delta = currentRight - currentLeft; // calculate pos difference
         Serial.println(delta);
         int correction = updatePDControl(delta);
-        setMotors(200 - correction, 200 + correction);
+        setMotors(200 * rightMotorDir - correction, 200 * leftMotorDir + correction);
 			}
 
 			break;
 
     case STATE_TURNING_RIGHT:
-      if(currentLeft >= targetLeft){
+      if(abs(currentLeft) >= abs(targetLeft)){
         setMotors(0,0);
         state = STATE_IDLE;          
       }
       else {
         bresenhamCounter += deltaLeft * 1000;       // hier *1000 damit wir das ratio genauer einstellen können
         while(bresenhamCounter > bresenhamRatio){
-          targetRight++;
+          targetRight += rightMotorDir;
           bresenhamCounter -= bresenhamRatio;  
         }
+        
         int delta = targetRight - currentRight;
         int correction = updatePDControl(delta);
 
@@ -227,7 +296,7 @@ void loop(){
             Serial.println(drivePower);
         }
 
-        setMotors(drivePower + correction, drivePower - correction);
+        setMotors(drivePower * rightMotorDir + correction, drivePower * leftMotorDir - correction);
       }
       break;
 	}
@@ -236,15 +305,18 @@ void loop(){
 		delay(2000);
       switch (programStep) {
         case 0:
-          turnRight(2000, 20000);
-          // turn(90);
+//          turnRight(2000, 20000);
+//          turnRight(5000, 5810);  //5150
+//          turnRight(67.0, 420.96);
+            turnRight(390.0 / 2.0, 390.0 * M_PI);
+//            drive(200);
           break;
         case 1:
-          delay(500);
+//          drive(-200);
           // turn(90);
           break;
         case 2:
-          drive(400);
+//          drive(400);
           break;
         case 3:
           // turn(90);
