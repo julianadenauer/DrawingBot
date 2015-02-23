@@ -16,6 +16,7 @@
 #define STATE_TURNING 2
 #define STATE_TURNING_WIDE 3
 #define STATE_TURNING_RIGHT 4
+#define STATE_TURNING_ON_SPOT 5
 
 #define ENC_0_A		2	//Interrupt0
 #define ENC_0_B		4
@@ -221,6 +222,22 @@ void turnRight(float radius, float distance){
   state = STATE_TURNING_RIGHT;
 }
 
+void turnOnSpot(float angleDeg)
+{
+  float distance = angleDeg * M_PI * wheelBase / 360.0;
+  targetLeft = (long)(distance * mmToCounts);
+  targetRight = -targetLeft;
+  
+  if (distance >= 0) leftMotorDir = 1;
+  else leftMotorDir = -1;
+  
+  rightMotorDir = -leftMotorDir;
+
+  resetCounters();
+  resetFilter();
+
+  state = STATE_TURNING_ON_SPOT;  
+}
 
 void resetCounters(){
   currentLeft = 0;
@@ -250,79 +267,225 @@ void loop(){
 		Serial.print(currentLeft);
 		Serial.print("\t\t");
 	#endif
-    
+       
 	switch(state){
-		case STATE_IDLE:
-			break;
+	  case STATE_IDLE:
+	    break;
+
+      // ---------------------- state driving -----------------------
 		
-		case STATE_DRIVING:
-			if(currentRight >= targetRight && currentLeft  >= targetLeft){
-				// stop motors
-				setMotors(0,0);
-				state = STATE_IDLE;
-			} else {
-        // ENCODER VERSION
-        long delta = currentRight - currentLeft; // calculate pos difference
-        Serial.println(delta);
-        int correction = updatePDControl(delta);
-        setMotors(200 * rightMotorDir - correction, 200 * leftMotorDir + correction);
-			}
+	case STATE_DRIVING:
+        {                
+           long distance;
 
-			break;
+           int drivePower = 200;
+           
+           const int slowDownDist = 200;
 
-    case STATE_TURNING_RIGHT:
-      if(abs(currentLeft) >= abs(targetLeft)){
-        setMotors(0,0);
-        state = STATE_IDLE;          
-      }
-      else {
-        bresenhamCounter += deltaLeft * 1000;       // hier *1000 damit wir das ratio genauer einstellen können
-        while(bresenhamCounter > bresenhamRatio){
-          targetRight += rightMotorDir;
-          bresenhamCounter -= bresenhamRatio;  
+           if (leftMotorDir > 0)  // (rightMotorDir == leftMotorDir)
+             distance = min(targetRight - currentRight, targetLeft - currentLeft);
+           else 
+             distance = -max(targetRight - currentRight, targetLeft - currentLeft);
+           
+          // ramp down drive-power if near final angle
+          if (distance < slowDownDist)
+          {
+            long temp = drivePower;
+            temp *= distance;
+            temp /= slowDownDist;
+            temp += 70;  // min. drive-power
+            drivePower = (int)temp;
+          }
+           
+           
+           if(distance < 10)
+           {
+	      // stop motors
+	      setMotors(0,0);
+	      state = STATE_IDLE;
+	   } else {
+           
+             // ENCODER VERSION
+             long delta = currentRight - currentLeft; // calculate pos difference
+             Serial.println(delta);
+             int correction = updatePDControl(delta);
+             setMotors(drivePower * rightMotorDir - correction, drivePower * leftMotorDir + correction);
+	   }
         }
-        
-        int delta = targetRight - currentRight;
-        int correction = updatePDControl(delta);
+	break;
 
-        int drivePower = 200;
-        
-        // anfahrrampe
-        int dT = millis() - startTime;
-        if(dT < rampLength){
-            long temp = drivePower - startPower;
-            temp *= dT;
-            drivePower = startPower + (int) (temp / rampLength);
-            Serial.println(drivePower);
+    // ---------------------- state turning right -----------------------
+
+        case STATE_TURNING_RIGHT:
+        {
+          if(abs(currentLeft) >= abs(targetLeft)){
+            setMotors(0,0);
+            state = STATE_IDLE;          
+          }
+          else 
+          {
+            bresenhamCounter += deltaLeft * 1000;       // hier *1000 damit wir das ratio genauer einstellen können
+            while(bresenhamCounter > bresenhamRatio){
+              targetRight += rightMotorDir;
+              bresenhamCounter -= bresenhamRatio;  
+            }
+            
+            int delta = targetRight - currentRight;
+            int correction = updatePDControl(delta);
+    
+            int drivePower = 200;
+            
+            // anfahrrampe
+            int dT = millis() - startTime;
+            if(dT < rampLength){
+                long temp = drivePower - startPower;
+                temp *= dT;
+                drivePower = startPower + (int) (temp / rampLength);
+                //Serial.println(drivePower);
+            }
+    
+            setMotors(drivePower * rightMotorDir + correction, drivePower * leftMotorDir - correction);
+          }
         }
+        break;
+      
+        // ------------------- state turning on spot --------------------
+      
+        case STATE_TURNING_ON_SPOT:
+        {  
+          long distance = min(abs(targetLeft - currentLeft), abs(targetRight - currentRight));
+        
+          int drivePower = 200;       
+        
+          const int slowDownDist = 200;
+        
+          // ramp down drive-power if near final angle
+          if (distance < slowDownDist)
+          {
+            long temp = drivePower;
+            temp *= distance;
+            temp /= slowDownDist;
+            temp += 70;  // min. drive-power
+            drivePower = (int)temp;
+          }
+          
+          if (distance < 10)
+          {
+            setMotors(0,0);
+            state = STATE_IDLE;          
+          }
+          else
+          {
+            
+            int delta = currentLeft + currentRight;
+            int correction = updatePDControl(delta);
+            
+            setMotors(drivePower * rightMotorDir - correction, drivePower * leftMotorDir - correction);
+            //setMotors(drivePower * rightMotorDir, drivePower * leftMotorDir);
+          }
+        }  
+        break;
+      
+      }  // end of switch
 
-        setMotors(drivePower * rightMotorDir + correction, drivePower * leftMotorDir - correction);
-      }
-      break;
-	}
+
+
 
 	if(state == STATE_IDLE){
-		delay(2000);
-      switch (programStep) {
+		if (programStep < 28) delay(500);
+switch (programStep) {
         case 0:
-//          turnRight(2000, 20000);
-//          turnRight(5000, 5810);  //5150
-//          turnRight(67.0, 420.96);
-            turnRight(390.0 / 2.0, 390.0 * M_PI);
-//            drive(200);
+          drive(150);
           break;
         case 1:
-//          drive(-200);
-          // turn(90);
+          turnOnSpot(-70);
           break;
         case 2:
-//          drive(400);
+          drive(60);
           break;
         case 3:
-          // turn(90);
+          turnOnSpot(140);
           break;
+        case 4:
+          drive(60);
+          break;
+        case 5:
+          turnOnSpot(-70);  // 73
+          break;
+        case 6:
+          drive(10);
+          break;
+        case 7:
+          turnOnSpot(-90);
+          break;
+        case 8:
+          drive(58);
+          break;
+        case 9:
+          turnOnSpot(90);
+          break;
+        case 10:
+          drive(35);
+          break;
+        case 11:
+          turnOnSpot(90);
+          break;
+        case 12:
+          drive(30);
+          break;
+        case 13:
+          turnOnSpot(90);
+          break;
+        case 14:
+          drive(25);
+          break;
+        case 15:
+          turnOnSpot(-127);  // -130
+          break;
+        case 16:
+          drive(37);
+          break;
+        case 17:
+          turnOnSpot(-50);  // -50
+          break;
+        case 18:
+          drive(40);
+          break;
+        case 19:
+          turnOnSpot(90);
+          break;
+        case 20:
+          drive(15);
+          break;
+        case 21:
+          turnOnSpot(93);  // 90
+          break;
+        case 22:
+          drive(156);
+          break;
+        case 23:
+          turnOnSpot(90);
+          break;
+        case 24:
+          turnRight(80, 80 * M_PI - 1);
+          break;
+        case 25:
+          turnOnSpot(-90);
+          break;                    
+        case 26:
+          drive(60);
+          break;
+        case 27:
+          turnOnSpot(184);
+          break;
+        case 28:
+          drive(-200);
+          break;
+        default:
+          delay(1000);
       }
-      
-      programStep = (programStep + 1) % 2;  // endless loop ...    
-	}
+
+      // programStep = (programStep + 1) % 18;  // endless loop ...
+        programStep += 1;
+      }
 }
