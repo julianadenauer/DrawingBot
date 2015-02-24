@@ -16,7 +16,8 @@
 #define STATE_TURNING 2
 #define STATE_TURNING_WIDE 3
 #define STATE_TURNING_RIGHT 4
-#define STATE_TURNING_ON_SPOT 5
+#define STATE_TURNING_LEFT 5
+#define STATE_TURNING_ON_SPOT 6
 
 #define ENC_0_A		2	//Interrupt0
 #define ENC_0_B		4
@@ -30,7 +31,13 @@ const float wheelBase = 89;
 
 const float mmToCounts = ((float)encoderCountsPerTurn) / (wheelDiameter * M_PI);
 
+const int StopRampDist = 200;
+const int MinDrivePower = 70;
+const int MaxDrivePower = 200;
 
+const int StartRampDuration = 500;
+
+const int StopDistance = 10;
 
 long lastX = 0;
 long lastY = 0;
@@ -53,7 +60,7 @@ int rightMotorDir;
 
 
 // var's for bresenham algorithmus used in turning-wide state
-int bresenhamRatio;
+long bresenhamRatio;
 long bresenhamCounter;
 
 int iValue;
@@ -104,7 +111,6 @@ void doEncoder0() {
   } else {
     currentRight++;
   }
-  //~ Serial.println(encoder0Pos,DEC);
 }
 
 void doEncoder1() {
@@ -152,7 +158,6 @@ void setMotors(int right, int left){
 
 void drive(float distance){
         
-  
 	state = STATE_DRIVING;
         if (distance >= 0)
         {
@@ -169,28 +174,33 @@ void drive(float distance){
 	targetLeft = (long)(mmToCounts * distance);
         resetFilter();
         resetCounters();
+        
+        startTime = millis();
 }
 
-/*
-void turnRight(int ratio, int distance){
-  resetCounters();
-  targetRight = 0;
-  bresenhamRatio = ratio;
-  bresenhamCounter = 0;
-  startTime = millis();
-  resetFilter();
+
+void turn(float radius, float distance)
+{
+  if (abs(radius) < 0.1)
+  {
+     turnOnSpot(distance * 360.0 / (2.0 * M_PI * radius));
+     return;
+  }
   
-  targetLeft = distance;
-
-  state = STATE_TURNING_RIGHT;
-}
-*/
-
-void turnRight(float radius, float distance){
+  resetFilter();
   resetCounters();
 
   targetRight = 0;
+  targetLeft = 0;
   bresenhamCounter = 0;
+
+
+  int turnSign = 1;
+  if (radius < 0)
+  {
+     radius = -radius;
+     turnSign = -1;
+  }
 
   if (distance >= 0)
   {
@@ -199,27 +209,49 @@ void turnRight(float radius, float distance){
   }
   else
   {
+    distance = -distance;
     leftMotorDir = -1;
     rightMotorDir = -1;
   }
   
-  float distanceLeft = distance * (radius + 0.5 * wheelBase) / radius;
+  float outerWheelDistance = distance * (radius + 0.5 * wheelBase) / radius;
   
-  float speedRatio = (radius + 0.5 * wheelBase) / (radius - 0.5 * wheelBase);
-  if (speedRatio < 0)
+  float speedRatio = (radius + 0.5 * wheelBase) / (radius - 0.5 * wheelBase); // hier kann div/0 auftreten, außerdem werte die den int (und sogar long) bereich übersteigen können
+  if (speedRatio < 0.0)
   {
     speedRatio =- speedRatio;
-    leftMotorDir = -leftMotorDir;
+    if (turnSign > 0) rightMotorDir = -rightMotorDir;
+    else leftMotorDir = -leftMotorDir;
   }
   
-  targetLeft = (long)(distanceLeft * mmToCounts) * leftMotorDir;
- 
-  bresenhamRatio = (int)(speedRatio * 1000);
+  if (turnSign > 0)
+  {
+    targetLeft = (long)(outerWheelDistance * mmToCounts) * leftMotorDir;
+    state = STATE_TURNING_RIGHT;
+  }
+  else
+  {
+    targetRight = (long)(outerWheelDistance * mmToCounts) * rightMotorDir;
+    state = STATE_TURNING_LEFT;
+  }
+   
+  bresenhamRatio = (long)(speedRatio * 1000.0);
+
+/*
+  Serial.print("speedRatio ");
+  Serial.println(speedRatio);
+  
+  Serial.print("bresenhamRatio ");
+  Serial.println(bresenhamRatio);
+  
+  Serial.print("targetLeft ");
+  Serial.println(targetLeft);
+
+  Serial.print("targetRight ");
+  Serial.println(targetRight);
+*/
   
   startTime = millis();
-  resetFilter();
- 
-  state = STATE_TURNING_RIGHT;
 }
 
 void turnOnSpot(float angleDeg)
@@ -236,7 +268,9 @@ void turnOnSpot(float angleDeg)
   resetCounters();
   resetFilter();
 
-  state = STATE_TURNING_ON_SPOT;  
+  startTime = millis();
+
+  state = STATE_TURNING_ON_SPOT; 
 }
 
 void resetCounters(){
@@ -245,6 +279,38 @@ void resetCounters(){
   lastLeft = 0;
   lastRight = 0;
 }
+
+
+// ---------- start and stop ramp ----------
+int getDrivePower(long distance)
+{
+  int drivePower = MaxDrivePower;
+  
+  if (distance < StopRampDist)
+  {
+    long temp = MaxDrivePower - MinDrivePower;
+    temp *= distance;
+    temp /= StopRampDist;
+    temp += MinDrivePower;
+    drivePower = (int)temp;
+  }
+  else
+  {
+    int dT = millis() - startTime;
+    if(dT < StartRampDuration)
+    {
+        long temp = MaxDrivePower - MinDrivePower;
+        temp *= dT;
+        drivePower = MinDrivePower + (int) (temp / StartRampDuration);
+    }
+  }
+  
+  //Serial.println(drivePower);
+  
+  return drivePower;
+}
+
+
 
 ///////////////////////////////////////
 // loop
@@ -277,8 +343,6 @@ void loop(){
 	case STATE_DRIVING:
         {                
            long distance;
-
-           int drivePower = 200;
            
            const int slowDownDist = 200;
 
@@ -287,18 +351,9 @@ void loop(){
            else 
              distance = -max(targetRight - currentRight, targetLeft - currentLeft);
            
-          // ramp down drive-power if near final angle
-          if (distance < slowDownDist)
-          {
-            long temp = drivePower;
-            temp *= distance;
-            temp /= slowDownDist;
-            temp += 70;  // min. drive-power
-            drivePower = (int)temp;
-          }
+           int drivePower = getDrivePower(distance);
            
-           
-           if(distance < 10)
+           if(distance < StopDistance)
            {
 	      // stop motors
 	      setMotors(0,0);
@@ -307,7 +362,7 @@ void loop(){
            
              // ENCODER VERSION
              long delta = currentRight - currentLeft; // calculate pos difference
-             Serial.println(delta);
+             //Serial.println(delta);
              int correction = updatePDControl(delta);
              setMotors(drivePower * rightMotorDir - correction, drivePower * leftMotorDir + correction);
 	   }
@@ -318,70 +373,83 @@ void loop(){
 
         case STATE_TURNING_RIGHT:
         {
-          if(abs(currentLeft) >= abs(targetLeft)){
+          long distance = targetLeft - currentLeft;
+          if (targetLeft < 0) distance = -distance;
+     
+          if(distance < StopDistance){
             setMotors(0,0);
             state = STATE_IDLE;          
           }
           else 
           {
-            bresenhamCounter += deltaLeft * 1000;       // hier *1000 damit wir das ratio genauer einstellen können
-            while(bresenhamCounter > bresenhamRatio){
+            bresenhamCounter += abs(deltaLeft * 1000);       // hier *1000 damit wir das ratio genauer einstellen können
+            while(bresenhamCounter > bresenhamRatio)
+            {
               targetRight += rightMotorDir;
               bresenhamCounter -= bresenhamRatio;  
             }
             
             int delta = targetRight - currentRight;
-            int correction = updatePDControl(delta);
-    
-            int drivePower = 200;
             
-            // anfahrrampe
-            int dT = millis() - startTime;
-            if(dT < rampLength){
-                long temp = drivePower - startPower;
-                temp *= dT;
-                drivePower = startPower + (int) (temp / rampLength);
-                //Serial.println(drivePower);
-            }
-    
-            setMotors(drivePower * rightMotorDir + correction, drivePower * leftMotorDir - correction);
+            int correction = updatePDControl(delta);
+                
+            int drivePower = getDrivePower(distance);
+
+            setMotors(drivePower * rightMotorDir + correction, drivePower * leftMotorDir);  // vorher war correction auch auf linkem rad...versehen?
           }
         }
         break;
+
+
+    // ---------------------- state turning left -----------------------
+
+        case STATE_TURNING_LEFT:
+        {
+          long distance = targetRight - currentRight;
+          if (targetRight < 0) distance = -distance;
+          
+          if(distance < StopDistance){
+            setMotors(0,0);
+            state = STATE_IDLE;
+          }
+          else 
+          {
+            bresenhamCounter += abs(deltaRight * 1000);       // hier *1000 damit wir das ratio genauer einstellen können
+            while(bresenhamCounter > bresenhamRatio){
+              targetLeft += leftMotorDir;
+              bresenhamCounter -= bresenhamRatio;
+            }
+            
+            int delta = targetLeft - currentLeft;
+            int correction = updatePDControl(delta);
+    
+            int drivePower = getDrivePower(distance);
+            
+            setMotors(drivePower * rightMotorDir, drivePower * leftMotorDir + correction);
+          }
+        }
+        break;
+
       
         // ------------------- state turning on spot --------------------
       
         case STATE_TURNING_ON_SPOT:
         {  
           long distance = min(abs(targetLeft - currentLeft), abs(targetRight - currentRight));
-        
-          int drivePower = 200;       
-        
-          const int slowDownDist = 200;
-        
-          // ramp down drive-power if near final angle
-          if (distance < slowDownDist)
-          {
-            long temp = drivePower;
-            temp *= distance;
-            temp /= slowDownDist;
-            temp += 70;  // min. drive-power
-            drivePower = (int)temp;
-          }
-          
-          if (distance < 10)
+                 
+          if (distance < StopDistance)
           {
             setMotors(0,0);
             state = STATE_IDLE;          
           }
           else
-          {
-            
+          {            
+            int drivePower = getDrivePower(distance);
+
             int delta = currentLeft + currentRight;
             int correction = updatePDControl(delta);
             
             setMotors(drivePower * rightMotorDir - correction, drivePower * leftMotorDir - correction);
-            //setMotors(drivePower * rightMotorDir, drivePower * leftMotorDir);
           }
         }  
         break;
@@ -467,7 +535,7 @@ switch (programStep) {
           turnOnSpot(90);
           break;
         case 24:
-          turnRight(80, 80 * M_PI - 1);
+          turn(80, 80 * M_PI - 1);
           break;
         case 25:
           turnOnSpot(-90);
